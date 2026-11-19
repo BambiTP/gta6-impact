@@ -26,6 +26,12 @@ td:first-child { font-weight: 500; }
 tr:hover td { background: #1e222b; }
 .up { color: var(--up); } .down { color: var(--down); } .flat { color: var(--dim); }
 svg { display: block; }
+#tabs button { background: var(--panel); color: var(--text); border: 1px solid var(--line); padding: 3px 10px; margin: 0 4px 6px 0; border-radius: 4px; cursor: pointer; }
+#tabs button.on { border-color: var(--accent); color: var(--accent); }
+#events { max-height: 240px; overflow-y: auto; background: var(--panel); border: 1px solid var(--line); }
+.ev { padding: 3px 8px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+.ev .t { color: var(--dim); margin-right: 8px; }
+.ev.launch { color: var(--accent); font-weight: 700; }
 #note { color: var(--dim); font-size: 12px; margin-top: 14px; }
 @media (max-width: 800px) { .hide { display: none; } }
 </style>
@@ -38,6 +44,11 @@ svg { display: block; }
 </header>
 <main>
 <div id="summary"></div>
+<h2>Timeline: everything as percent change from baseline</h2>
+<div id="tabs"></div>
+<div id="timeline-chart"></div>
+<h2>Event log (moves of 2 percent or more within 2 minutes; chatter counts of 3 or more)</h2>
+<div id="events"></div>
 <div id="groups"></div>
 <p id="note">Baseline is the first reading taken (before launch). The red line on each chart marks the launch moment, the dotted line is the baseline. "1 min" is the change over the last minute. Readings come every 15 seconds. GTA 6 is not sold on Steam, so Steam rows show whether people leave other games for it. Chatter rows are public posts and edits and saturate at their stated maximum.</p>
 </main>
@@ -63,6 +74,53 @@ function spark(points, launch) {
   if (launch > t0 && launch <= t1) s += '<line x1="' + x(launch) + '" x2="' + x(launch) + '" y1="0" y2="' + h + '" stroke="#ff5c5c"/>';
   return s + '<polyline fill="none" stroke="' + (up ? '#3ecf8e' : '#ff5c5c') + '" stroke-width="1.5" points="' + points.map(p => x(p[0]).toFixed(1) + ',' + y(p[1]).toFixed(1)).join(' ') + '"/></svg>';
 }
+
+const PALETTE = ['#3ecf8e','#ffb020','#5aa9ff','#ff5c5c','#c792ea','#4dd0e1','#f78fb3','#d4e157','#ff8a65','#90a4ae','#a1887f','#80cbc4'];
+let tab = null, lastData = null;
+function timelineChart(rows, d) {
+  const w = Math.min(1200, document.body.clientWidth - 28), h = 280, L = 44, B = 18, T = 6, R = 8;
+  const t0 = Math.min(...rows.map(r => r.p[0][0])), t1 = Math.max(d.now, d.launchAt);
+  const pct = r => r.p.map(q => [q[0], r.first ? (q[1] / r.first - 1) * 100 : 0]);
+  const lines = rows.map(pct); let lo = 0, hi = 0;
+  lines.forEach(l => l.forEach(q => { lo = Math.min(lo, q[1]); hi = Math.max(hi, q[1]); }));
+  if (hi - lo < 1) { hi += .5; lo -= .5; }
+  const x = t => L + (t - t0) / (t1 - t0 || 1) * (w - L - R), y = v => T + (hi - v) / (hi - lo) * (h - T - B);
+  let s = '<svg id="timeline-svg" width="' + w + '" height="' + h + '" style="background:#181b22;border:1px solid #2a2e38">';
+  for (let i = 0; i <= 4; i++) { const v = lo + (hi - lo) * i / 4; s += '<line x1="' + L + '" x2="' + (w - R) + '" y1="' + y(v) + '" y2="' + y(v) + '" stroke="#2a2e38"/><text x="4" y="' + (y(v) + 4) + '" fill="#8b91a1" font-size="10">' + v.toFixed(1) + '%</text>'; }
+  s += '<line x1="' + L + '" x2="' + (w - R) + '" y1="' + y(0) + '" y2="' + y(0) + '" stroke="#666" stroke-dasharray="3"/>';
+  for (let i = 0; i <= 5; i++) { const t = t0 + (t1 - t0) * i / 5; s += '<text x="' + x(t) + '" y="' + (h - 4) + '" fill="#8b91a1" font-size="10" text-anchor="middle">' + new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) + '</text>'; }
+  if (d.launchAt >= t0) s += '<line x1="' + x(d.launchAt) + '" x2="' + x(d.launchAt) + '" y1="' + T + '" y2="' + (h - B) + '" stroke="#ff5c5c" stroke-width="2"/><text x="' + (x(d.launchAt) + 4) + '" y="' + (T + 10) + '" fill="#ff5c5c" font-size="11">LAUNCH</text>';
+  lines.forEach((l, i) => { s += '<polyline fill="none" stroke="' + PALETTE[i % PALETTE.length] + '" stroke-width="1.5" points="' + l.map(q => x(q[0]).toFixed(1) + ',' + y(q[1]).toFixed(1)).join(' ') + '"><title>' + rows[i].name + '</title></polyline>'; });
+  s += '</svg><div style="margin:4px 0 8px">' + rows.map((r, i) => '<span style="color:' + PALETTE[i % PALETTE.length] + ';margin-right:12px;white-space:nowrap">&#9632; ' + r.name.replace(/ \(.*\)| tagged.*|, past.*/, '') + '</span>').join('') + '</div>';
+  return s;
+}
+function buildEvents(all, d) {
+  const ev = [];
+  for (const r of all) {
+    const chatter = r.s.group === 'Chatter', p = r.p;
+    let lastAt = 0;
+    for (let i = 1; i < p.length; i++) {
+      const j = p.findIndex(q => q[0] >= p[i][0] - 120000), prev = p[j][1], cur = p[i][1];
+      const big = chatter ? Math.abs(cur - prev) >= 3 : prev && Math.abs(cur / prev - 1) >= 0.02;
+      if (big && p[i][0] - lastAt > 120000) {
+        lastAt = p[i][0];
+        ev.push({ t: p[i][0], text: r.name + ' went from ' + fmt(prev) + ' to ' + fmt(cur) + (chatter ? '' : ' (' + sign(((cur / prev - 1) * 100).toFixed(1)) + '%)'), up: cur > prev });
+      }
+    }
+  }
+  ev.push({ t: d.launchAt, text: 'GTA 6 launch time', launch: true });
+  return ev.filter(e => e.t <= d.now || e.launch).sort((a, b) => b.t - a.t);
+}
+function renderTimeline() {
+  if (!lastData) return;
+  const { d, groups, all } = lastData, names = Object.keys(groups);
+  tab = tab || 'All';
+  document.getElementById('tabs').innerHTML = ['All', ...names].map(n => '<button class="' + (n === tab ? 'on' : '') + '" data-tab="' + n + '">' + n + '</button>').join('');
+  document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => { tab = b.dataset.tab; renderTimeline(); });
+  document.getElementById('timeline-chart').innerHTML = timelineChart(tab === 'All' ? all : groups[tab], d);
+  const ev = buildEvents(all, d);
+  document.getElementById('events').innerHTML = ev.length ? ev.map(e => '<div class="ev ' + (e.launch ? 'launch' : '') + '"><span class="t">' + new Date(e.t).toLocaleTimeString() + '</span>' + (e.launch ? '' : '<span class="' + (e.up ? 'up' : 'down') + '">' + (e.up ? '&#9650; ' : '&#9660; ') + '</span>') + e.text + '</div>').join('') : 'No big moves yet.';
+}
 function tick() {
   if (!launchAt) return;
   const left = launchAt - (Date.now() + serverOffset), el = document.getElementById('countdown');
@@ -84,6 +142,7 @@ async function load() {
       if (pre && d.now > d.launchAt) row.sinceLaunch = last - pre[1];
       (groups[s.group] ||= []).push(row); all.push(row);
     }
+    lastData = { d, groups, all }; renderTimeline();
     const steam = groups['Steam players right now'] || [], stocks = groups['Stock prices (US dollars)'] || [];
     const steamTotal = steam.reduce((a, r) => a + r.last, 0), steamBase = steam.reduce((a, r) => a + r.first, 0);
     const moved = [...all].sort((a, b) => Math.abs(b.pct) - Math.abs(a.pct))[0], ttwo = all.find(r => r.name.includes('TTWO'));
